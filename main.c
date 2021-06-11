@@ -5,26 +5,49 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <sys\timeb.h> 
+#include <Windows.h>
+#include <stdint.h> 
+#include <intrin.h>
+
+int gettimeofday(struct timeval* tp, struct timezone* tzp)
+{
+	// Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's
+	// This magic number is the number of 100 nanosecond intervals since January 1, 1601 (UTC)
+	// until 00:00:00 January 1, 1970 
+	static const uint64_t EPOCH = ((uint64_t)116444736000000000ULL);
+
+	SYSTEMTIME  system_time;
+	FILETIME    file_time;
+	uint64_t    time;
+
+	GetSystemTime(&system_time);
+	SystemTimeToFileTime(&system_time, &file_time);
+	time = ((uint64_t)file_time.dwLowDateTime);
+	time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+	tp->tv_sec = (long)((time - EPOCH) / 10000000L);
+	tp->tv_usec = (long)(system_time.wMilliseconds * 1000);
+	return 0;
+}
+
+static inline uint64_t rdtsc() {
+    return __rdtsc();
+}
+
+
+
+#define ftello _ftelli64
+#elif __linux__
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
-static long long ustime(void) {
-    struct timeval tv;
-    long long ust;
-
-    gettimeofday(&tv, NULL);
-    ust = ((long long)tv.tv_sec) * 1e6;
-    ust += tv.tv_usec;
-    return ust;
-}
-
-typedef uint64_t (*fns)(uint64_t, const void *, const uint64_t);
-
 /* GCC 4.8 on Linux is dumb */
 #ifndef ftello
-extern off_t ftello(FILE *stream);
+extern off_t ftello(FILE* stream);
 #endif
 
 static inline uint64_t rdtsc() {
@@ -36,6 +59,31 @@ static inline uint64_t rdtsc() {
     __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
+
+
+#elif __ANDROID__
+
+#elif __APPLE__
+
+#endif
+
+
+
+
+typedef uint64_t (*fns64)(uint64_t, const void *, const uint64_t);
+typedef uint16_t (*fns16)(uint16_t crc, const void* in_data, uint64_t len);
+
+static long long ustime(void) {
+	struct timeval tv;
+	long long ust;
+
+	gettimeofday(&tv, NULL);
+	ust = ((long long)tv.tv_sec) * 1e6;
+	ust += tv.tv_usec;
+	return ust;
+}
+
+
 
 int main(int argc, char *argv[]) {
     crc64speed_init();
@@ -83,14 +131,21 @@ int main(int argc, char *argv[]) {
     }
 
     char *filename = argv[1];
-    FILE *fp = fopen(filename, "r");
+    FILE* fp = NULL;
+    fopen_s(&fp, filename, "r");
+
+    if (fp == NULL)
+    {
+        perror("Can't open file");
+        return 1;
+    }
 
     if (fseek(fp, 0, SEEK_END) == -1) {
         perror("Can't find file length");
         return 1;
     }
 
-    off_t sz = ftello(fp);
+    long long sz = ftello(fp);
     rewind(fp);
     char *contents = malloc(sz); /* potentially very big */
 
@@ -102,9 +157,11 @@ int main(int argc, char *argv[]) {
 
     fclose(fp);
 
-    fns compares[] = {crc64,      crc64_lookup,      crc64speed,
-                      (fns)crc16, (fns)crc16_lookup, (fns)crc16speed};
-    size_t cc = sizeof(compares) / sizeof(*compares); /* compare count */
+    fns64 compares64[] = { crc64,      crc64_lookup,      crc64speed };
+    fns16 compares16[] = { crc16,      crc16_lookup,      crc16speed };
+ 
+    size_t cc64 = sizeof(compares64) / sizeof(*compares64);
+    size_t cc16 = sizeof(compares16) / sizeof(*compares16); /* compare count */
     char *names[] = {"crc64 (no table)", "crc64 (lookup table)", "crc64speed",
                      "crc16 (no table)", "crc16 (lookup table)", "crc16speed"};
     bool is16[] = {false, false, false, true, true, true};
@@ -114,19 +171,28 @@ int main(int argc, char *argv[]) {
 
     bool error = false;
     uint64_t accum_result = 0;
-    for (size_t i = 0; i < cc; i++) {
+    for (size_t i = 0; i < cc64 + cc16; i++) {
         if (is16[i]) {
             crc16speed_cache_table();
+			/* prime the code path with a dummy untimed call */
+			compares16[i - cc64](0, li, sizeof(li));
         } else {
             crc64speed_cache_table();
+			/* prime the code path with a dummy untimed call */
+			compares16[i](0, li, sizeof(li));
         }
 
-        /* prime the code path with a dummy untimed call */
-        compares[i](0, li, sizeof(li));
+        
 
         long long start = ustime();
         uint64_t start_c = rdtsc();
-        uint64_t result = compares[i](0, contents, sz);
+        uint64_t result = 0;
+        if (is16[i]) {
+			result = compares16[i - cc64](0, contents, sz);
+        } else {
+			result = compares64[i](0, contents, sz);
+        }
+
         uint64_t stop_c = rdtsc();
         long long end = ustime();
 
