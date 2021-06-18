@@ -67,7 +67,34 @@ static inline uint64_t rdtsc() {
 
 #endif
 
+#ifdef _MSC_VER             // Compiler: Microsoft Visual Studio
 
+#ifdef _M_IX86                      // Processor: x86
+
+inline uint64_t clockCycleCount()
+{
+	uint64_t c;
+	__asm {
+		cpuid       // serialize processor
+		rdtsc       // read time stamp counter
+		mov dword ptr[c + 0], eax
+		mov dword ptr[c + 4], edx
+	}
+	return c;
+}
+
+#elif defined(_M_X64)               // Processor: x64
+
+extern unsigned __int64 __rdtsc();
+#pragma intrinsic(__rdtsc)
+inline uint64_t clockCycleCount()
+{
+	return __rdtsc();
+}
+
+#endif
+
+#endif
 
 
 typedef uint64_t (*fns64)(uint64_t, const void *, const uint64_t);
